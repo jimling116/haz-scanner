@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black">
-    <title>HAZDEC Scanner Pro</title>
+    <title>HAZDEC Scanner Pro - Error Detection</title>
     <!-- Tesseract.js with specific version for better reliability -->
     <script src='https://unpkg.com/tesseract.js@4.1.1/dist/tesseract.min.js'></script>
     <style>
@@ -437,6 +437,36 @@
             color: #999;
         }
         
+        .debug-panel {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.9);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 12px;
+            padding: 16px;
+            font-size: 12px;
+            font-family: 'SF Mono', Consolas, monospace;
+            max-width: 300px;
+            display: none;
+            z-index: 100;
+        }
+        
+        .debug-panel.active {
+            display: block;
+        }
+        
+        .debug-title {
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #00ff00;
+        }
+        
+        .debug-line {
+            margin: 4px 0;
+            color: #999;
+        }
+        
         @media (max-width: 600px) {
             .main-content {
                 padding: 16px;
@@ -471,7 +501,7 @@
     <div class="app-container">
         <div class="header">
             <h1>HAZDEC Scanner Pro</h1>
-            <div class="subtitle">Optimized for GitHub Pages</div>
+            <div class="subtitle">Error Detection System</div>
         </div>
         
         <div class="main-content">
@@ -530,6 +560,13 @@
             </div>
         </div>
     </div>
+    
+    <div class="debug-panel" id="debugPanel">
+        <div class="debug-title">OCR Debug Info</div>
+        <div class="debug-line">Detected Text: <span id="debugText">-</span></div>
+        <div class="debug-line">UN Numbers Found: <span id="debugUN">-</span></div>
+        <div class="debug-line">Confidence: <span id="debugConfidence">-</span>%</div>
+    </div>
 
     <script>
         // Configuration
@@ -540,10 +577,14 @@
             IMAGE: {
                 TARGET_WIDTH: 1280,
                 TARGET_HEIGHT: 960
+            },
+            TABLE: {
+                ROW_TOLERANCE: 20,
+                COLUMN_TOLERANCE: 40
             }
         };
         
-        // Enhanced database
+        // Enhanced database with validation rules
         const dgDatabase = {
             'UN1066': { psn: 'NITROGEN, COMPRESSED', class: '2.2', pg: null },
             'UN1072': { psn: 'OXYGEN, COMPRESSED', class: '2.2', pg: null },
@@ -551,11 +592,16 @@
             'UN1046': { psn: 'HELIUM, COMPRESSED', class: '2.2', pg: null },
             'UN3090': { psn: 'LITHIUM METAL BATTERIES', class: '9', pg: null },
             'UN3091': { psn: 'LITHIUM METAL BATTERIES CONTAINED IN EQUIPMENT', class: '9', pg: null },
+            'UN3091': { psn: 'LITHIUM METAL BATTERIES PACKED WITH EQUIPMENT', class: '9', pg: null },
             'UN3480': { psn: 'LITHIUM ION BATTERIES', class: '9', pg: null },
             'UN3481': { psn: 'LITHIUM ION BATTERIES CONTAINED IN EQUIPMENT', class: '9', pg: null },
+            'UN3481': { psn: 'LITHIUM ION BATTERIES PACKED WITH EQUIPMENT', class: '9', pg: null },
+            'UN3166': { psn: 'VEHICLE, FLAMMABLE GAS POWERED', class: '9', pg: null },
+            'UN3166': { psn: 'VEHICLE, FLAMMABLE LIQUID POWERED', class: '9', pg: null },
             'UN3166': { psn: 'ENGINE, INTERNAL COMBUSTION', class: '9', pg: null },
             'UN3528': { psn: 'ENGINE, INTERNAL COMBUSTION, FLAMMABLE LIQUID POWERED', class: '3', pg: null },
             'UN3529': { psn: 'ENGINE, INTERNAL COMBUSTION, FLAMMABLE GAS POWERED', class: '2.1', pg: null },
+            'UN3530': { psn: 'ENGINE, INTERNAL COMBUSTION', class: '9', pg: null },
             'UN1203': { psn: 'GASOLINE', class: '3', pg: 'II' },
             'UN1863': { psn: 'FUEL, AVIATION, TURBINE ENGINE', class: '3', pg: 'III' },
             'UN1202': { psn: 'DIESEL FUEL', class: '3', pg: 'III' },
@@ -572,6 +618,11 @@
         let ocrWorker = null;
         let startTime = null;
         let tesseractLoaded = false;
+        
+        // Enable debug mode with hash
+        if (window.location.hash === '#debug') {
+            document.getElementById('debugPanel').classList.add('active');
+        }
         
         // Wait for page load
         window.addEventListener('DOMContentLoaded', async function() {
@@ -715,10 +766,10 @@
                 updateProcessingStatus('Analyzing Document...', 'Running OCR', 30);
                 const ocrResult = await performOCR(enhancedCanvas);
                 
-                updateProcessingStatus('Extracting Data...', 'Finding hazards', 70);
-                const extractedData = extractHazards(ocrResult);
+                updateProcessingStatus('Extracting Data...', 'Finding hazard entries', 70);
+                const extractedData = extractStructuredData(ocrResult);
                 
-                updateProcessingStatus('Validating Results...', 'Checking database', 90);
+                updateProcessingStatus('Validating Results...', 'Checking for errors', 90);
                 displayResults(extractedData);
                 
                 progressFill.style.width = '100%';
@@ -756,34 +807,263 @@
         
         async function performOCR(canvas) {
             const result = await ocrWorker.recognize(canvas);
+            
+            // Update debug info
+            if (document.getElementById('debugPanel').classList.contains('active')) {
+                const text = result.data.text.substring(0, 100) + '...';
+                document.getElementById('debugText').textContent = text;
+                document.getElementById('debugConfidence').textContent = Math.round(result.data.confidence || 0);
+            }
+            
             return result.data;
         }
         
-        function extractHazards(ocrData) {
-            const hazards = [];
+        function extractStructuredData(ocrData) {
             const text = ocrData.text.toUpperCase();
+            const words = ocrData.words || [];
             const lines = ocrData.lines || [];
             
-            // Look for UN numbers
-            const unPattern = /UN\s*(\d{4})|\b(\d{4})\b/g;
-            let match;
+            console.log('Full OCR text:', text);
             
-            while ((match = unPattern.exec(text)) !== null) {
-                const unNumber = 'UN' + (match[1] || match[2]);
-                if (dgDatabase[unNumber]) {
-                    hazards.push({
+            // Find table boundaries
+            const tableData = findTableData(lines, words);
+            
+            // Extract hazard entries
+            const hazards = extractHazardEntries(tableData, text);
+            
+            // Update debug info
+            if (document.getElementById('debugPanel').classList.contains('active')) {
+                const unNumbers = hazards.map(h => h.un || 'Unknown').join(', ');
+                document.getElementById('debugUN').textContent = unNumbers || 'None';
+            }
+            
+            return hazards;
+        }
+        
+        function findTableData(lines, words) {
+            // Group words by approximate row position
+            const rows = [];
+            const processedWords = new Set();
+            
+            for (const word of words) {
+                if (processedWords.has(word)) continue;
+                
+                // Find or create row
+                let row = rows.find(r => 
+                    Math.abs(r.centerY - word.bbox.y0) < CONFIG.TABLE.ROW_TOLERANCE
+                );
+                
+                if (!row) {
+                    row = {
+                        centerY: word.bbox.y0,
+                        words: [],
+                        text: ''
+                    };
+                    rows.push(row);
+                }
+                
+                row.words.push(word);
+                processedWords.add(word);
+            }
+            
+            // Sort rows by Y position and build text
+            rows.sort((a, b) => a.centerY - b.centerY);
+            rows.forEach(row => {
+                row.words.sort((a, b) => a.bbox.x0 - b.bbox.x0);
+                row.text = row.words.map(w => w.text).join(' ').toUpperCase();
+            });
+            
+            return rows;
+        }
+        
+        function extractHazardEntries(rows, fullText) {
+            const hazards = [];
+            
+            // Method 1: Look for UN numbers in structured rows
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                const rowText = row.text;
+                
+                // Look for UN number patterns
+                const unMatch = rowText.match(/UN\s*(\d{4})|(?:^|\s)(\d{4})(?:\s|$)/);
+                if (unMatch) {
+                    const unNumber = 'UN' + (unMatch[1] || unMatch[2]);
+                    
+                    // Skip common false positives (years, quantities, etc.)
+                    const num = parseInt(unMatch[1] || unMatch[2]);
+                    if (num < 1000 || num > 3600) continue;
+                    
+                    const hazard = {
                         un: unNumber,
-                        psn: dgDatabase[unNumber].psn,
-                        class: dgDatabase[unNumber].class,
-                        pg: dgDatabase[unNumber].pg,
-                        detected: true,
-                        confidence: ocrData.confidence || 0
-                    });
+                        psn: null,
+                        class: null,
+                        pg: null,
+                        confidence: row.words.reduce((sum, w) => sum + (w.confidence || 0), 0) / row.words.length,
+                        detectedText: rowText,
+                        errors: {}
+                    };
+                    
+                    // Try to extract other fields from the same row
+                    extractFieldsFromRow(hazard, rowText, rows, i);
+                    
+                    hazards.push(hazard);
                 }
             }
             
-            // If no hazards found, return empty array
+            // Method 2: Fallback - look for UN numbers in full text if no structured data found
+            if (hazards.length === 0) {
+                const unPattern = /UN\s*(\d{4})/g;
+                let match;
+                
+                while ((match = unPattern.exec(fullText)) !== null) {
+                    const unNumber = 'UN' + match[1];
+                    const hazard = {
+                        un: unNumber,
+                        psn: null,
+                        class: null,
+                        pg: null,
+                        confidence: 50, // Lower confidence for fallback method
+                        detectedText: 'Extracted from unstructured text',
+                        errors: {}
+                    };
+                    
+                    hazards.push(hazard);
+                }
+            }
+            
             return hazards;
+        }
+        
+        function extractFieldsFromRow(hazard, rowText, allRows, rowIndex) {
+            // Remove UN number from text to avoid confusion
+            const cleanText = rowText.replace(/UN\s*\d{4}/, '').trim();
+            
+            // Extract Class
+            const classMatch = cleanText.match(/\b([1-9](?:\.\d)?)\b/);
+            if (classMatch) {
+                hazard.class = classMatch[1];
+            }
+            
+            // Extract Packing Group
+            const pgMatch = cleanText.match(/\b(I{1,3})\b/);
+            if (pgMatch && pgMatch[1] !== 'I') { // Avoid single 'I' false positives
+                hazard.pg = pgMatch[1];
+            }
+            
+            // Extract PSN - this is the tricky part
+            // First, try to get it from the same row
+            let psnText = cleanText
+                .replace(/\b\d+(?:\.\d)?\b/g, '') // Remove class
+                .replace(/\b(I{1,3})\b/g, '') // Remove PG
+                .replace(/\s+/g, ' ')
+                .trim();
+            
+            if (psnText && psnText.length > 3) {
+                hazard.psn = psnText;
+            }
+            
+            // If PSN not found or too short, check next rows for multi-line PSN
+            if (!hazard.psn || hazard.psn.length < 10) {
+                const psnParts = [];
+                
+                // Look at next 2-3 rows for continuation
+                for (let j = rowIndex + 1; j < Math.min(rowIndex + 4, allRows.length); j++) {
+                    const nextRow = allRows[j];
+                    const nextText = nextRow.text;
+                    
+                    // Stop if we hit another UN number or obvious boundary
+                    if (nextText.match(/UN\s*\d{4}/) || 
+                        nextText.match(/ADDITIONAL|TOTAL|SIGNATURE/)) {
+                        break;
+                    }
+                    
+                    // Check if this looks like PSN continuation
+                    if (nextText.length > 2 && !nextText.match(/^\d+$/)) {
+                        psnParts.push(nextText);
+                    }
+                }
+                
+                if (psnParts.length > 0) {
+                    const fullPSN = (hazard.psn || '') + ' ' + psnParts.join(' ');
+                    hazard.psn = fullPSN.trim();
+                }
+            }
+        }
+        
+        function validateHazard(hazard) {
+            const validation = {
+                hasErrors: false,
+                errors: {}
+            };
+            
+            // Check if UN number exists in database
+            const dbEntry = dgDatabase[hazard.un];
+            if (!dbEntry) {
+                validation.errors.un = 'UN number not in database';
+                validation.hasErrors = true;
+                return validation;
+            }
+            
+            // Validate PSN
+            if (!hazard.psn) {
+                validation.errors.psn = 'PSN not detected';
+                validation.hasErrors = true;
+            } else {
+                // Normalize for comparison
+                const detectedPSN = normalizeText(hazard.psn);
+                const expectedPSN = normalizeText(dbEntry.psn);
+                
+                // Check if PSN matches (allow some flexibility for OCR errors)
+                if (!areSimilar(detectedPSN, expectedPSN, 0.8)) {
+                    validation.errors.psn = `Should be "${dbEntry.psn}"`;
+                    validation.hasErrors = true;
+                }
+            }
+            
+            // Validate Class
+            if (!hazard.class) {
+                validation.errors.class = 'Class not detected';
+                validation.hasErrors = true;
+            } else if (hazard.class !== dbEntry.class) {
+                validation.errors.class = `Should be Class ${dbEntry.class}`;
+                validation.hasErrors = true;
+            }
+            
+            // Validate Packing Group
+            if (dbEntry.pg === null) {
+                if (hazard.pg) {
+                    validation.errors.pg = 'PG not used for this class';
+                    validation.hasErrors = true;
+                }
+            } else {
+                if (!hazard.pg) {
+                    validation.errors.pg = 'PG required';
+                    validation.hasErrors = true;
+                } else if (hazard.pg !== dbEntry.pg) {
+                    validation.errors.pg = `Should be ${dbEntry.pg}`;
+                    validation.hasErrors = true;
+                }
+            }
+            
+            return validation;
+        }
+        
+        function normalizeText(text) {
+            return text.replace(/[,\s]+/g, ' ').trim().toUpperCase();
+        }
+        
+        function areSimilar(str1, str2, threshold = 0.8) {
+            // Simple similarity check - could be improved with Levenshtein distance
+            const words1 = str1.split(' ');
+            const words2 = str2.split(' ');
+            
+            let matches = 0;
+            for (const word of words1) {
+                if (words2.includes(word)) matches++;
+            }
+            
+            const similarity = matches / Math.max(words1.length, words2.length);
+            return similarity >= threshold;
         }
         
         function displayResults(hazards) {
@@ -792,52 +1072,79 @@
             
             let html = '<div class="results-content">';
             
-            const hasErrors = false; // Simplified - no validation for now
-            const statusClass = hazards.length === 0 ? 'fail' : 'pass';
-            const statusText = hazards.length === 0 ? 'NO HAZARDS DETECTED' : `${hazards.length} HAZARD(S) FOUND`;
+            // Validate all hazards
+            const validatedHazards = hazards.map(h => ({
+                ...h,
+                validation: validateHazard(h)
+            }));
+            
+            const hasErrors = validatedHazards.some(h => h.validation.hasErrors);
+            const statusClass = hasErrors ? 'fail' : 'pass';
+            const statusText = hazards.length === 0 ? 'NO HAZARDS DETECTED' : 
+                              hasErrors ? 'ERRORS FOUND' : 'ALL VALID';
             
             html += `
                 <div class="results-header">
                     <h2>Scan Results</h2>
                     <div class="status-badge ${statusClass}">
-                        <span>${hazards.length === 0 ? '⚠️' : '✅'}</span>
+                        <span>${hazards.length === 0 ? '⚠️' : hasErrors ? '❌' : '✅'}</span>
                         ${statusText}
                     </div>
                 </div>
             `;
             
             if (hazards.length === 0) {
-                html += '<p style="text-align: center; color: #999; padding: 40px 0;">No dangerous goods detected. Try capturing a clearer image of the HAZDEC form.</p>';
+                html += '<p style="text-align: center; color: #999; padding: 40px 0;">No dangerous goods entries detected. Ensure the HAZDEC table is clearly visible and try again.</p>';
             } else {
                 html += `
                     <div class="table-container">
                         <table class="hazards-table">
                             <thead>
                                 <tr>
-                                    <th>UN Number</th>
+                                    <th>UN/ID Number</th>
                                     <th>Proper Shipping Name</th>
                                     <th>Class</th>
                                     <th>PG</th>
+                                    <th>Status</th>
                                 </tr>
                             </thead>
                             <tbody>
                 `;
                 
-                for (const hazard of hazards) {
-                    html += `<tr class="success-row">`;
+                for (const hazard of validatedHazards) {
+                    const validation = hazard.validation;
+                    const rowClass = validation.hasErrors ? 'error-row' : 'success-row';
+                    
+                    html += `<tr class="${rowClass}">`;
+                    
+                    // UN Number
                     html += `<td><div class="cell-content">
-                        <span class="value">${hazard.un}</span>
-                        <span class="confidence">Confidence: ${Math.round(hazard.confidence || 0)}%</span>
+                        <span class="value">${hazard.un || 'Not detected'}</span>
+                        <span class="confidence">Conf: ${Math.round(hazard.confidence || 0)}%</span>
+                        ${validation.errors.un ? `<span class="error-text">${validation.errors.un}</span>` : ''}
                     </div></td>`;
+                    
+                    // PSN
                     html += `<td><div class="cell-content">
-                        <span class="value">${hazard.psn}</span>
+                        <span class="value">${hazard.psn || 'Not detected'}</span>
+                        ${validation.errors.psn ? `<span class="error-text">${validation.errors.psn}</span>` : ''}
                     </div></td>`;
+                    
+                    // Class
                     html += `<td><div class="cell-content">
-                        <span class="value">${hazard.class}</span>
+                        <span class="value">${hazard.class || 'Not detected'}</span>
+                        ${validation.errors.class ? `<span class="error-text">${validation.errors.class}</span>` : ''}
                     </div></td>`;
+                    
+                    // PG
                     html += `<td><div class="cell-content">
                         <span class="value">${hazard.pg || '-'}</span>
+                        ${validation.errors.pg ? `<span class="error-text">${validation.errors.pg}</span>` : ''}
                     </div></td>`;
+                    
+                    // Status
+                    html += `<td><span class="status-icon">${validation.hasErrors ? '❌' : '✅'}</span></td>`;
+                    
                     html += '</tr>';
                 }
                 
